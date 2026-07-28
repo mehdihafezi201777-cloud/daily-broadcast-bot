@@ -1,280 +1,176 @@
-import os
-import json
 import asyncio
 from datetime import datetime
-from telegram import Bot, Update
+
+import pytz
+
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes
 )
-import pytz
+
+from config import TOKEN, ADMIN_IDS, TIMEZONE
+from database import *
 
 
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
-
-if not TOKEN:
-    raise ValueError("BOT_TOKEN تنظیم نشده")
-
-if not ADMIN_ID:
-    raise ValueError("ADMIN_ID تنظیم نشده")
-
-ADMIN_ID = int(ADMIN_ID)
-
-DATA_FILE = "data.json"
+init_db()
 
 
-def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {
-            "chats": [],
-            "texts": ["", "", ""],
-            "times": ["09:00", "14:00", "21:00"]
-        }
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-data = load_data()
-
-TEHRAN_TZ = pytz.timezone("Asia/Tehran")
-bot = Bot(token=TOKEN)
-
-
-def is_admin(update):
-    return update.effective_user and update.effective_user.id == ADMIN_ID
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not is_admin(update):
-        return
+    user = update.effective_user
+
+    add_user(user.id)
 
     await update.message.reply_text(
-        """
-🤖 ربات آماده است
-
-/addchat @channel
-/removechat @channel
-
-/listchats
-
-/settext 1 متن
-/settext 2 متن
-/settext 3 متن
-
-/settime 1 09:00
-/settime 2 14:00
-/settime 3 21:00
-
-/status
-"""
+        "✅ ثبت شدید"
     )
 
 
-async def add_chat(update, context):
 
-    if not is_admin(update):
+async def broadcast(update: Update, context):
+
+    if not is_admin(update.effective_user.id):
         return
+
 
     if not context.args:
-        await update.message.reply_text("مثال: /addchat @channel")
-        return
-
-    chat = context.args[0]
-
-    if chat not in data["chats"]:
-        data["chats"].append(chat)
-        save_data(data)
-
-    await update.message.reply_text("✅ اضافه شد")
-
-
-async def remove_chat(update, context):
-
-    if not is_admin(update):
-        return
-
-    if not context.args:
-        return
-
-    chat = context.args[0]
-
-    if chat in data["chats"]:
-        data["chats"].remove(chat)
-        save_data(data)
-
-    await update.message.reply_text("✅ حذف شد")
-
-
-async def list_chats(update, context):
-
-    if not is_admin(update):
-        return
-
-    if not data["chats"]:
-        await update.message.reply_text("لیست خالی است")
-        return
-
-    await update.message.reply_text(
-        "\n".join(data["chats"])
-    )
-
-
-async def set_text(update, context):
-
-    if not is_admin(update):
-        return
-
-    if len(context.args) < 2:
-        return
-
-    index = int(context.args[0]) - 1
-    text = " ".join(context.args[1:])
-
-    if 0 <= index < 3:
-        data["texts"][index] = text
-        save_data(data)
-
-    await update.message.reply_text("✅ متن تغییر کرد")
-
-
-async def set_time(update, context):
-
-    if not is_admin(update):
-        return
-
-    if len(context.args) < 2:
-        return
-
-    index = int(context.args[0]) - 1
-    time = context.args[1]
-
-    if 0 <= index < 3:
-        data["times"][index] = time
-        save_data(data)
-
-    await update.message.reply_text("✅ ساعت تغییر کرد")
-
-
-async def status(update, context):
-
-    if not is_admin(update):
-        return
-
-    msg = "📊 وضعیت:\n\n"
-
-    for i in range(3):
-        msg += (
-            f"⏰ {data['times'][i]}\n"
-            f"📝 {data['texts'][i] or 'خالی'}\n\n"
+        await update.message.reply_text(
+            "متن پیام را وارد کنید"
         )
-
-    msg += f"گروه‌ها: {len(data['chats'])}"
-
-    await update.message.reply_text(msg)
+        return
 
 
+    text = " ".join(context.args)
 
-async def send_to_all(text):
+    count = 0
 
-    for chat in data["chats"]:
+    for user_id in get_users():
 
         try:
-            await bot.send_message(
-                chat_id=chat,
-                text=text
+            await context.bot.send_message(
+                user_id,
+                text
             )
 
-        except Exception as e:
-            print(
-                f"خطا در ارسال {chat}: {e}"
-            )
+            count += 1
+
+            await asyncio.sleep(0.05)
+
+        except Exception:
+            pass
 
 
-async def scheduler():
+    await update.message.reply_text(
+        f"ارسال شد: {count}"
+    )
+
+
+
+async def set_daily(update:Update,context):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+
+    if len(context.args)<2:
+        await update.message.reply_text(
+            "/setdaily 09:00 متن پیام"
+        )
+        return
+
+
+    time = context.args[0]
+    text = " ".join(context.args[1:])
+
+
+    save_setting("time",time)
+    save_setting("text",text)
+
+    await update.message.reply_text(
+        "✅ ذخیره شد"
+    )
+
+
+
+async def scheduler(app):
+
+    sent_today = None
 
     while True:
 
         now = datetime.now(
-            TEHRAN_TZ
-        ).strftime("%H:%M")
+            pytz.timezone(TIMEZONE)
+        )
 
-        for i, t in enumerate(data["times"]):
 
-            if now == t and data["texts"][i]:
+        daily_time = get_setting("time")
 
-                await send_to_all(
-                    data["texts"][i]
-                )
 
-                await asyncio.sleep(60)
+        if daily_time:
+
+            if now.strftime("%H:%M")==daily_time:
+
+                if sent_today != now.date():
+
+                    text=get_setting("text")
+
+                    if text:
+
+                        for uid in get_users():
+
+                            try:
+                                await app.bot.send_message(
+                                    uid,
+                                    text
+                                )
+
+                            except:
+                                pass
+
+
+                        sent_today=now.date()
 
 
         await asyncio.sleep(30)
 
 
 
-async def after_start(app):
 
-    app.create_task(
-        scheduler()
-    )
+async def main():
 
-
-
-def main():
-
-    app = (
-        Application
-        .builder()
-        .token(TOKEN)
-        .post_init(after_start)
-        .build()
-    )
+    app = Application.builder().token(
+        TOKEN
+    ).build()
 
 
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler("start",start)
     )
 
     app.add_handler(
-        CommandHandler("addchat", add_chat)
+        CommandHandler("broadcast",broadcast)
     )
 
     app.add_handler(
-        CommandHandler("removechat", remove_chat)
-    )
-
-    app.add_handler(
-        CommandHandler("listchats", list_chats)
-    )
-
-    app.add_handler(
-        CommandHandler("settext", set_text)
-    )
-
-    app.add_handler(
-        CommandHandler("settime", set_time)
-    )
-
-    app.add_handler(
-        CommandHandler("status", status)
+        CommandHandler("setdaily",set_daily)
     )
 
 
-    print("Bot started...")
+    asyncio.create_task(
+        scheduler(app)
+    )
 
-    app.run_polling()
+
+    await app.run_polling()
 
 
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":
+    asyncio.run(main())
